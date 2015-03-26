@@ -12,56 +12,58 @@ import Data.Functor ((<$>))
 import Data.Monoid (mconcat)
 import Data.Either (isRight)
 import Data.Binary (Word8)
+import Data.List (intersperse)
+import Data.Convertible (convert)
 import qualified Data.Vector.Storable as V
 import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString as B
 
 -- Generators
-magic :: BC.ByteString
-magic = BC.pack "P5"
-
-int :: Gen Int
-int =  unpackPositive <$> (arbitrary :: Gen (Positive Int))
-  where unpackPositive (Positive i) = i
-
-space :: Gen BC.ByteString
-space = BC.singleton <$> elements " \t\n\r\f"
-
-spaces :: Gen BC.ByteString
+sepBy gen xs = sequence $ intersperse gen $ return <$> xs
+space = elements [" ", "\t", "\n", "\r", "\f"]
 spaces = mconcat <$> listOf1 space
 
-pixel :: Word8 -> Gen B.ByteString
-pixel max = B.singleton <$> elements [0..max]
+pixels :: Int -> Int -> Int -> Gen [Word8]
+pixels w h m = vectorOf (w * h) $ elements [0..(convert m)]
 
-pixels :: Int -> Int -> Word8 -> Gen B.ByteString
-pixels w h max = mconcat <$> vectorOf (w * h) (pixel max)
+number :: Gen Int
+number = getNonNegative <$> arbitrary
 
-packNum :: (Num a, Show a) => a -> BC.ByteString
-packNum = BC.pack . show
+config :: Gen (Int, Int, Int, [Word8])
+config = do
+  width  <- number
+  height <- number
+  maxVal <- return 255
+  px <- pixels width height maxVal
+  return (width, height, maxVal, px)
 
-pgmFile = do
-  s       <- spaces
-  width   <- int
-  s'      <- spaces
-  height  <- int
-  s''     <- spaces
-  let maxVal = 255 -- hardcoded for the meantime; will deal with > 255 format later
-  s       <- space
-  px      <- pixels width height maxVal
-  return $ mconcat [magic, s, packNum width, s', packNum height, s'', packNum maxVal, s, px]
+pgm :: Gen PGM
+pgm = pgm' <$> config
 
-pgm :: Gen I.PGM
-pgm = do
-  w  <- int
-  h  <- int
-  let max = 255
-  px <- vectorOf (w * h) $ elements ([0..255] :: [Word8])
-  return $ I.PGM w h max $ V.fromList px
+pgm' :: (Int, Int, Int, [Word8]) -> PGM
+pgm' (width, height, maxVal, px) = PGM width height maxVal $ V.fromList px
+
+pgmFile = pgmFile' <$> config
+
+pgmFile' (width, height, maxVal, px) = do
+  let headerItems = "P5" : (show <$> [width, height, maxVal])
+  header <- BC.pack . mconcat <$> sepBy spaces headerItems
+  space' <- BC.pack <$> space
+  let body = B.pack px
+
+  return $ mconcat [header, space', body]
+
+pgmAndPgmFile :: Gen (PGM, B.ByteString)
+pgmAndPgmFile = do
+  config' <- config
+  let pgm'' = pgm' config'
+  file' <- pgmFile' config'
+  return (pgm'', file')
 
 -- Tests
 testInternal = describe "Vision.Image.Storage.PGM.Internal" $ do
   it "should have the property parse . format == Right id" $ property $
     forAll pgm (\pgm' -> (I.parse . I.format) pgm' `shouldBe` Right pgm')
 
-  it "parse should succeed for all valid pgmFiles" $ property $
-    forAll pgmFile (\pgmFile' -> I.parse pgmFile' `shouldSatisfy` isRight)
+  it "parsing file should produce the same as the pre-genned parsed equivalent" $ property $
+    forAll pgmAndPgmFile (\(pgm', pgmFile') -> I.parse pgmFile' `shouldBe` Right pgm')
